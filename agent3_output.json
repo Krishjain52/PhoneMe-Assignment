@@ -1,0 +1,85 @@
+{
+  "incident_title": "Database Connection Pool Exhaustion Remediation",
+  "severity": "P1",
+  "recommended_solution": "S5: Rollback deployment 2026.03.17-2 and S1: Fix session leak in rebalance_service.py",
+  "rationale": "Rolling back to a known-good state (S5) immediately stops new leaks, and then applying the code fix (S1) addresses the root cause. This approach minimizes risk and downtime while ensuring a permanent resolution.",
+  "pre_checks": [
+    {
+      "step": 1,
+      "action": "Verify current deployment version and identify previous artifact (2026.03.17-1) for rollback",
+      "expected_result": "Confirmation of current deployment version and identification of previous artifact"
+    },
+    {
+      "step": 2,
+      "action": "Check Postgres max_connections and available connection slots",
+      "expected_result": "Knowledge of current Postgres connection limits and available headroom"
+    },
+    {
+      "step": 3,
+      "action": "Review recent changes to the rebalance workflow and session lifecycle in the rebalance_service.py file",
+      "expected_result": "Understanding of recent code changes and potential causes of the session leak"
+    }
+  ],
+  "remediation_steps": [
+    {
+      "step": 1,
+      "action": "Trigger rollback to deployment 2026.03.17-1 via CI/CD or manually swap the application bundle",
+      "notes": "This step reverts the application to a known-good state, stopping new leaks",
+      "validation": "Verify that the rollback is successful and the application is running with the previous version"
+    },
+    {
+      "step": 2,
+      "action": "Restart gunicorn workers: `systemctl restart gunicorn` or equivalent",
+      "notes": "This step ensures that the rolled-back application is fully restarted",
+      "validation": "Confirm that gunicorn workers are restarted and the application is responding"
+    },
+    {
+      "step": 3,
+      "action": "Locate portfolio/rebalance_service.py line 118 and replace bare `session = SessionLocal()` with `with SessionLocal() as session:`",
+      "notes": "This step applies the code fix to address the session leak",
+      "validation": "Verify that the code change is correctly applied and the session leak is fixed"
+    },
+    {
+      "step": 4,
+      "action": "Deploy the code fix (deployment version 2026.03.17-3 or hotfix branch)",
+      "notes": "This step ensures that the code fix is deployed to the production environment",
+      "validation": "Confirm that the deployment is successful and the application is running with the updated code"
+    }
+  ],
+  "post_fix_validation": [
+    {
+      "check": "Connection pool metrics",
+      "command_or_method": "Monitor pool metrics using a tool like Prometheus or Grafana",
+      "pass_criteria": "Confirmed stabilization of checked_out connections and no further errors"
+    },
+    {
+      "check": "Application logs",
+      "command_or_method": "Review application logs for any errors or warnings related to database connections",
+      "pass_criteria": "No errors or warnings related to database connections"
+    },
+    {
+      "check": "Postgres connection slots",
+      "command_or_method": "Verify available Postgres connection slots using `SHOW max_connections;` in psql",
+      "pass_criteria": "Sufficient available connection slots"
+    }
+  ],
+  "rollback_plan": {
+    "trigger": "If the remediation steps cause further issues or do not resolve the connection pool exhaustion",
+    "steps": [
+      "Revert the code change and redeploy the previous version",
+      "Revert any changes made to Postgres configuration"
+    ]
+  },
+  "parallel_mitigations": [
+    "Increase Postgres max_connections and tune superuser reservation (S4) to prevent Postgres-side rejection",
+    "Temporarily disable the rebalance endpoint or rate-limit it (S3) to stop new connections from being leaked"
+  ],
+  "escalation": "If the remediation steps do not resolve the issue within 2 hours, escalate to the on-call DBA and/or the development team lead",
+  "communication_template": "Database connection pool exhaustion incident: current status is [insert current status], expected resolution time is [insert expected resolution time]",
+  "estimated_resolution_time": "2-4 hours",
+  "long_term_recommendations": [
+    "Regularly review and monitor database connection pool metrics",
+    "Implement automated monitoring and alerting for database connection pool issues",
+    "Consider increasing the Postgres max_connections limit and tuning superuser reservation"
+  ]
+}

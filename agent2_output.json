@@ -1,0 +1,199 @@
+{
+  "agent1_root_cause": "Database connection pool exhaustion due to a suspected session leak",
+  "research_sources": [
+    {
+      "url": "https://docs.sqlalchemy.org/en/20/core/pooling.html",
+      "title": "SQLAlchemy Connection Pooling \u2014 official docs",
+      "retrieved": true,
+      "relevant_excerpt": "LIFO Using Connection Pools with Multiprocessing or os.fork() Using a pool instance directly API Documentation - Available Pool Implementations Pool Pool.__init__() Pool.connect() Pool.dispose() Pool.recreate() Pool.status() QueuePool QueuePool.__init__() QueuePool.dispose() QueuePool.recreate() QueuePool.status() AsyncAdaptedQueuePool SingletonThreadPool SingletonThreadPool.connect() SingletonThreadPool.dispose() SingletonThreadPool.recreate() SingletonThreadPool.status() AssertionPool AssertionPool.dispose() AssertionPool.recreate() AssertionPool.status() NullPool NullPool.dispose() NullPool"
+    },
+    {
+      "url": "https://www.postgresql.org/docs/current/runtime-config-connection.html",
+      "title": "PostgreSQL \u2014 Connection Settings (max_connections)",
+      "retrieved": true,
+      "relevant_excerpt": "max_connections ( integer ) # Determines the maximum number of concurrent connections to the database server. \u2026 PostgreSQL sizes certain resources based directly on the value of max_connections . \u2026 Whenever the number of free connection slots is greater than superuser_reserved_connections but less than or equal to the sum of superuser_reserved_connections and reserved_connections , new connections will be accepted only for superusers and roles with privileges of pg_use_reserved_connections . \u2026 If superuser_reserved_connections or fewer connection slots are available, new connections will be ac"
+    },
+    {
+      "url": "https://docs.gunicorn.org/en/stable/settings.html",
+      "title": "Gunicorn \u2014 Configuration (workers, timeout)",
+      "retrieved": false,
+      "relevant_excerpt": "(unavailable)"
+    },
+    {
+      "url": "https://docs.sqlalchemy.org/en/20/orm/session_basics.html",
+      "title": "SQLAlchemy ORM \u2014 Session Lifecycle",
+      "retrieved": true,
+      "relevant_excerpt": "When do I construct a Session , when do I commit it, and when do I close it? \u2026 When do I construct a Session , when do I commit it, and when do I close it? \u2026 It is then used in a Python context manager (i.e. \u2026 with: statement) so that it is automatically closed at the end of the block; this is equivalent to calling the Session.close() method. \u2026 Note Note that after Session.commit() is called, either explicitly or when using a context manager, all objects associated with the Session are expired , meaning their contents are erased to be re-loaded within the next transaction. \u2026 Framing out a begi"
+    },
+    {
+      "url": "https://docs.gunicorn.org/en/stable/faq.html",
+      "title": "Gunicorn FAQ \u2014 Worker Timeouts",
+      "retrieved": false,
+      "relevant_excerpt": "(unavailable)"
+    },
+    {
+      "url": "https://nginx.org/en/docs/http/ngx_http_proxy_module.html",
+      "title": "Nginx \u2014 proxy_read_timeout / proxy_connect_timeout",
+      "retrieved": true,
+      "relevant_excerpt": "english \u0440\u0443\u0441\u0441\u043a\u0438\u0439 news about download security documentation faq books community enterprise community forum (new) x.com blog njs ingress controller gateway fabric Module ngx_http_proxy_module Example Configuration Directives proxy_allow_upstream proxy_bind proxy_bind_dynamic proxy_buffer_size proxy_buffering proxy_buffers proxy_busy_buffers_size proxy_cache proxy_cache_background_update proxy_cache_bypass proxy_cache_convert_head proxy_cache_key proxy_cache_lock proxy_cache_lock_age proxy_cache_lock_timeout proxy_cache_max_range_offset proxy_cache_methods proxy_cache_min_uses proxy_cache_path pr"
+    }
+  ],
+  "solutions": [
+    {
+      "id": "S1",
+      "title": "Fix session leak in rebalance_service.py (immediate code fix)",
+      "description": "The logs show a session close was skipped at portfolio/rebalance_service.py:118 and that db connections are not returning to the pool after rebalance requests. Wrap every SessionLocal() usage in a `with` block (context manager) so the session is guaranteed to close on exit or exception.",
+      "steps": [
+        "Locate portfolio/rebalance_service.py line 118.",
+        "Replace bare `session = SessionLocal()` with `with SessionLocal() as session:`.",
+        "Verify all other SessionLocal call sites use context managers.",
+        "Deploy the fix (deployment version 2026.03.17-3 or hotfix branch)."
+      ],
+      "risk": "LOW \u2014 pure code change, no infra touch",
+      "production_safe": true,
+      "source_ids": [
+        "SQLAlchemy ORM \u2014 Session Lifecycle"
+      ],
+      "pros": [
+        "Fixes the actual root cause",
+        "Low risk",
+        "Immediately stops leak"
+      ],
+      "cons": [
+        "Requires code deploy",
+        "May not release existing leaked connections"
+      ]
+    },
+    {
+      "id": "S2",
+      "title": "Increase SQLAlchemy pool_size and max_overflow (short-term relief)",
+      "description": "Raise pool_size from 20 to ~40 and max_overflow from 5 to 10 in SQLAlchemy config. This buys headroom while the code fix is prepared but does NOT fix the leak.",
+      "steps": [
+        "Edit SQLAlchemy engine creation: `create_engine(..., pool_size=40, max_overflow=10, pool_timeout=30, pool_recycle=1800)`",
+        "Restart gunicorn workers: `kill -HUP <gunicorn_master_pid>`",
+        "Monitor pool metrics; confirm checked_out stabilises."
+      ],
+      "risk": "MEDIUM \u2014 higher pool size increases load on Postgres; verify max_connections headroom first",
+      "production_safe": true,
+      "source_ids": [
+        "SQLAlchemy Connection Pooling \u2014 official docs"
+      ],
+      "pros": [
+        "No code deploy required (config only)",
+        "Immediate relief"
+      ],
+      "cons": [
+        "Masks the leak rather than fixing it",
+        "Postgres max_connections may be a hard ceiling",
+        "Will exhaust again if leak rate is high"
+      ]
+    },
+    {
+      "id": "S3",
+      "title": "Temporarily disable the rebalance endpoint / rate-limit it",
+      "description": "Return 503 or queue rebalance requests while the fix is deployed. This stops new connections from being leaked while the root cause is addressed.",
+      "steps": [
+        "Add an Nginx location block to return 503 for POST /api/v1/orders/rebalance.",
+        "Or set a feature flag in app config to short-circuit the rebalance handler.",
+        "Communicate maintenance window to affected users."
+      ],
+      "risk": "LOW infra risk, HIGH business impact \u2014 users cannot rebalance",
+      "production_safe": true,
+      "source_ids": [
+        "Nginx \u2014 proxy_read_timeout / proxy_connect_timeout"
+      ],
+      "pros": [
+        "Stops the leak source immediately",
+        "Buys time for careful fix"
+      ],
+      "cons": [
+        "Degrades service for rebalance users",
+        "Requires fast communication"
+      ]
+    },
+    {
+      "id": "S4",
+      "title": "Increase Postgres max_connections and tune superuser reservation",
+      "description": "Postgres rejected connections with 'remaining connection slots are reserved for superuser'. Raising max_connections and reducing superuser_reserved_connections gives the app more slots, but only treats the symptom.",
+      "steps": [
+        "Check current value: `SHOW max_connections;` in psql.",
+        "Edit postgresql.conf: `max_connections = 200` (or appropriate value for RAM).",
+        "Also consider: `superuser_reserved_connections = 3` (default is 3, can lower to 2).",
+        "Reload Postgres: `pg_ctlcluster <ver> main reload` or `systemctl reload postgresql`."
+      ],
+      "risk": "MEDIUM \u2014 each Postgres connection uses ~5-10 MB RAM; validate server memory first",
+      "production_safe": true,
+      "source_ids": [
+        "PostgreSQL \u2014 Connection Settings (max_connections)"
+      ],
+      "pros": [
+        "Prevents Postgres-side rejection",
+        "No app code change"
+      ],
+      "cons": [
+        "Does not fix the leak",
+        "Memory risk if connections accumulate indefinitely",
+        "Requires Postgres reload (brief disruption possible)"
+      ]
+    },
+    {
+      "id": "S5",
+      "title": "Rollback deployment 2026.03.17-2",
+      "description": "Logs explicitly note that deployment 2026.03.17-2 (deployed at 11:34) touched the db session lifecycle in the rebalance workflow, and the incident started at 11:40. Rolling back to 2026.03.17-1 would immediately stop new leaks.",
+      "steps": [
+        "Identify previous artifact: deployment tag 2026.03.17-1.",
+        "Trigger rollback via CI/CD or manually swap the application bundle.",
+        "Restart gunicorn: `systemctl restart gunicorn` or equivalent.",
+        "Monitor pool metrics to confirm connections return."
+      ],
+      "risk": "LOW \u2014 reverts to known-good state",
+      "production_safe": true,
+      "source_ids": [],
+      "pros": [
+        "Fastest way to stop the leak",
+        "No new code required",
+        "Strong causal evidence in logs supports this"
+      ],
+      "cons": [
+        "Loses any other fixes in 2026.03.17-2",
+        "Need to identify what changed in that deploy"
+      ]
+    }
+  ],
+  "risky_actions_avoid": [
+    {
+      "id": "RISKY-1",
+      "title": "Kill all idle Postgres connections manually",
+      "reason": "pg_terminate_backend on active sessions can corrupt in-flight transactions."
+    },
+    {
+      "id": "RISKY-2",
+      "title": "Set pool_timeout=0 to disable waiting",
+      "reason": "Would cause immediate errors for all requests instead of slow degradation."
+    }
+  ],
+  "recommended_order": [
+    "S5",
+    "S1",
+    "S2",
+    "S3",
+    "S4"
+  ],
+  "notes": "S5 (rollback) stops the bleeding fastest. S1 (code fix) is the permanent cure. S2 and S4 are mitigations that should follow S1 if pool settings need tuning post-fix. S3 is a circuit-breaker of last resort.",
+  "handoff_for_agent3": {
+    "top_solution_ids": [
+      "S5",
+      "S1"
+    ],
+    "supporting_solution_ids": [
+      "S2"
+    ],
+    "avoid_ids": [
+      "RISKY-1",
+      "RISKY-2"
+    ],
+    "confirmed_root_cause": "Database connection pool exhaustion due to a suspected session leak",
+    "deploy_version_implicated": "2026.03.17-2",
+    "code_path": "portfolio/rebalance_service.py:118"
+  }
+}

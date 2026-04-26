@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""
+Incident Response Orchestrator
+Runs the 3-agent pipeline end-to-end and writes a final Markdown report.
+
+Usage:
+    python main.py
+    python main.py --verbose      # show agent progress (default)
+    python main.py --quiet        # suppress agent chatter
+
+Environment variables required:
+    ANTHROPIC_API_KEY   — used by Agent 1 and Agent 3
+"""
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+# Ensure the project directory is importable (flat layout)
+sys.path.insert(0, str(Path(__file__).parent))
+
+import agent1_log_analysis
+import agent2_solution_research
+import agent3_resolution_planner
+
+OUTPUT_DIR = Path(__file__).parent
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Markdown report renderer
+# ---------------------------------------------------------------------------
+
+def render_markdown(a1: dict, a2: dict, a3: dict) -> str:
+    ts = datetime.utcnow().strftime("%Y-%m-%d %Human:%M UTC")
+    lines = [
+        f"# Incident Report — {a3.get('incident_title', 'API Outage')}",
+        f"**Generated:** {ts}  ",
+        f"**Severity:** {a3.get('severity', '?')}  ",
+        f"**Estimated Resolution:** {a3.get('estimated_resolution_time', '?')}",
+        "",
+        "---",
+        "",
+        "## 1. Root Cause (Agent 1)",
+        "",
+        f"**Summary:** {a1.get('root_cause_summary')}",
+        "",
+        f"{a1.get('root_cause_detail')}",
+        "",
+        f"**Confidence:** {a1.get('confidence')}  ",
+        f"**Faulty Component:** `{a1.get('component_at_fault')}`  ",
+        f"**Affected Endpoints:** {', '.join(a1.get('affected_endpoints', []))}",
+        "",
+        "### Timeline",
+    ]
+    for ev in a1.get("timeline", []):
+        lines.append(f"- `{ev['timestamp']}` — {ev['event']}")
+
+    lines += [
+        "",
+        "### Key Evidence",
+    ]
+    for e in a1.get("key_evidence", []):
+        lines.append(f"- **{e['log_file']}**: `{e['snippet']}`  ")
+        lines.append(f"  → {e['significance']}")
+
+    lines += [
+        "",
+        "### Alternative Hypotheses",
+    ]
+    for h in a1.get("alternative_hypotheses", []):
+        lines.append(f"- {h}")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## 2. Solution Options (Agent 2)",
+        "",
+        f"**Research note:** {a2.get('notes', '')}",
+        "",
+        f"**Recommended order:** {' → '.join(a2.get('recommended_order', []))}",
+        "",
+    ]
+    for sol in a2.get("solutions", []):
+        safe = "✅ Production-safe" if sol.get("production_safe") else "⚠️ Use with caution"
+        lines += [
+            f"### {sol['id']}: {sol['title']}",
+            f"**Risk:** {sol.get('risk')}  {safe}",
+            "",
+            sol.get("description", ""),
+            "",
+            "**Pros:** " + ", ".join(sol.get("pros", [])),
+            "**Cons:** " + ", ".join(sol.get("cons", [])),
+            "",
+        ]
+
+    lines += [
+        "### Sources Retrieved",
+    ]
+    for src in a2.get("research_sources", []):
+        status = "✓" if src.get("retrieved") else "✗ (unavailable)"
+        lines.append(f"- [{src['title']}]({src['url']}) {status}")
+
+    lines += [
+        "",
+        "---",
+        "",
+        "## 3. Remediation Runbook (Agent 3)",
+        "",
+        f"**Chosen solution:** {a3.get('recommended_solution')}",
+        "",
+        f"**Rationale:** {a3.get('rationale')}",
+        "",
+        "### Pre-Checks",
+    ]
+    for pc in a3.get("pre_checks", []):
+        lines += [
+            f"{pc['step']}. **{pc['action']}**",
+            f"   → Expected: {pc['expected_result']}",
+        ]
+
+    lines += ["", "### Remediation Steps"]
+    for s in a3.get("remediation_steps", []):
+        lines += [
+            f"**Step {s['step']}:** {s['action']}",
+            f"- Notes: {s.get('notes', '')}",
+            f"- Validate: {s.get('validation', '')}",
+            "",
+        ]
+
+    lines += ["### Post-Fix Validation"]
+    for v in a3.get("post_fix_validation", []):
+        lines += [
+            f"- **{v['check']}**",
+            f"  - How: `{v.get('command_or_method', '')}`",
+            f"  - Pass: {v.get('pass_criteria', '')}",
+        ]
+
+    rp = a3.get("rollback_plan", {})
+    lines += [
+        "",
+        "### Rollback Plan",
+        f"**Trigger:** {rp.get('trigger', '')}",
+    ]
+    for rs in rp.get("steps", []):
+        lines.append(f"- {rs}")
+
+    lines += [
+        "",
+        "### Parallel Mitigations",
+    ]
+    for pm in a3.get("parallel_mitigations", []):
+        lines.append(f"- {pm}")
+
+    lines += [
+        "",
+        f"### Escalation",
+        a3.get("escalation", ""),
+        "",
+        "### Stakeholder Update",
+        f"> {a3.get('communication_template', '')}",
+        "",
+        "### Long-term Recommendations",
+    ]
+    for lt in a3.get("long_term_recommendations", []):
+        lines.append(f"- {lt}")
+
+    lines += ["", "---", "_Report generated by 3-agent incident-response system._"]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="3-Agent Incident Response System")
+    parser.add_argument("--quiet", action="store_true", help="Suppress agent progress output")
+    args = parser.parse_args()
+    verbose = not args.quiet
+
+    print("=" * 60)
+    print("  INCIDENT RESPONSE SYSTEM — 3-AGENT PIPELINE")
+    print("=" * 60)
+
+    # Agent 1
+    t0 = time.time()
+    print("\n[PIPELINE] Running Agent 1: Log Analysis...")
+    a1 = agent1_log_analysis.run(verbose=verbose)
+    with open(OUTPUT_DIR / "agent1_output.json", "w") as f:
+        json.dump(a1, f, indent=2)
+    print(f"[PIPELINE] Agent 1 done in {time.time()-t0:.1f}s")
+
+    # Agent 2
+    t1 = time.time()
+    print("\n[PIPELINE] Running Agent 2: Solution Research...")
+    a2 = agent2_solution_research.run(a1, verbose=verbose)
+    with open(OUTPUT_DIR / "agent2_output.json", "w") as f:
+        json.dump(a2, f, indent=2)
+    print(f"[PIPELINE] Agent 2 done in {time.time()-t1:.1f}s")
+
+    # Agent 3
+    t2 = time.time()
+    print("\n[PIPELINE] Running Agent 3: Resolution Planning...")
+    a3 = agent3_resolution_planner.run(a1, a2, verbose=verbose)
+    with open(OUTPUT_DIR / "agent3_output.json", "w") as f:
+        json.dump(a3, f, indent=2)
+    print(f"[PIPELINE] Agent 3 done in {time.time()-t2:.1f}s")
+
+    # Final report
+    report_md = render_markdown(a1, a2, a3)
+    report_path = OUTPUT_DIR / "incident_report.md"
+    with open(report_path, "w") as f:
+        f.write(report_md)
+
+    total = time.time() - t0
+    print(f"\n{'='*60}")
+    print(f"  PIPELINE COMPLETE in {total:.1f}s")
+    print(f"  Severity:  {a3.get('severity')}")
+    print(f"  Cause:     {a1.get('root_cause_summary')}")
+    print(f"  Solution:  {a3.get('recommended_solution')}")
+    print(f"  Report:    {report_path}")
+    print(f"{'='*60}\n")
+
+
+if __name__ == "__main__":
+    main()
